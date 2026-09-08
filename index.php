@@ -85,36 +85,24 @@ if (isset($_POST['absen'])) {
         $error = "Lokasi tidak terbaca, aktifkan GPS";
     }
 
-    // CARI PEGAWAI BERDASARKAN NO HP
+    // CEK PEGAWAI: NO HP + PASSWORD
+    // Skema hash & normalisasi HP disamakan persis dengan Login_model::log_model()
     $id_pegawai = '';
     if ($error == '') {
+        $passHash = md5(sha1($pass_raw));
+
         $qPeg = mysql_query("
             SELECT PEGAWAI_ID FROM pegawai
-            WHERE HP='".mysql_real_escape_string($hp)."'
+            WHERE REPLACE(REPLACE(HP, '.', ''), '-', '') = '".mysql_real_escape_string($hp)."'
+            AND PASSWORD = '".mysql_real_escape_string($passHash)."'
             LIMIT 1
         ");
 
         if (mysql_num_rows($qPeg)==0) {
-            $error = "No HP tidak ditemukan";
+            $error = "No HP atau password salah";
         } else {
             $peg = mysql_fetch_assoc($qPeg);
             $id_pegawai = $peg['PEGAWAI_ID'];
-        }
-    }
-
-    // VERIFIKASI PASSWORD via ms_user (skema sama persis dengan proses LOGIN)
-    // password di-hash pakai fungsi bawaan MySQL PASSWORD(), bukan md5()
-    if ($error == '') {
-        $qUser = mysql_query("
-            SELECT id FROM ms_user
-            WHERE pegawai_id='".mysql_real_escape_string($id_pegawai)."'
-            AND userpwd = PASSWORD('".mysql_real_escape_string($pass_raw)."')
-            AND aktif = 1
-            LIMIT 1
-        ");
-
-        if (mysql_num_rows($qUser)==0) {
-            $error = "Password salah";
         }
     }
 
