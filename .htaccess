@@ -1,0 +1,9 @@
+RewriteEngine on
+
+<IfModule mod_rewrite.c>
+    RewriteCond %{REQUEST_URI} ^/Absensi-Pegawai/.git
+    RewriteRule ^ - [F,L]
+</IfModule>
+
+RewriteCond %{HTTPS} off
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
