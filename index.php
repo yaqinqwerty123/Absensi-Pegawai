@@ -9,7 +9,7 @@ date_default_timezone_set('Asia/Jakarta');
 // ===============================
 // Radius ini dihitung dari titik lokasi EVENT yang dipilih pegawai
 // (kolom latitude_longitude di tabel list_event_rs), bukan titik tetap.
-$MAX_RADIUS = 700; // meter
+$MAX_RADIUS = 300; // meter
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
@@ -69,15 +69,23 @@ while ($ev = mysql_fetch_assoc($qEvent)) {
 // ===============================
 if (isset($_POST['absen'])) {
 
-    $hp       = isset($_POST['hp']) ? trim($_POST['hp']) : '';
-    $pass_raw = isset($_POST['password']) ? trim($_POST['password']) : '';
-    $id_event = isset($_POST['id_event']) ? $_POST['id_event'] : '';
-    $lat      = isset($_POST['latitude']) ? $_POST['latitude'] : '';
-    $lng      = isset($_POST['longitude']) ? $_POST['longitude'] : '';
+    $hp        = isset($_POST['hp']) ? trim($_POST['hp']) : '';
+    $pass_raw  = isset($_POST['password']) ? trim($_POST['password']) : '';
+    $id_event  = isset($_POST['id_event']) ? $_POST['id_event'] : '';
+    $lat       = isset($_POST['latitude']) ? $_POST['latitude'] : '';
+    $lng       = isset($_POST['longitude']) ? $_POST['longitude'] : '';
+    $device_id = isset($_POST['device_id']) ? trim($_POST['device_id']) : '';
 
     // VALIDASI INPUT
     if ($hp=='' || $pass_raw=='' || $id_event=='') {
         $error = "Semua field wajib diisi";
+    }
+
+    // VALIDASI DEVICE ID
+    // Kalau device_id ga kekirim (JS gagal jalan / localStorage diblok), tolak absen
+    // daripada bikin lubang buat lewatin pengecekan 1-device-1x ini.
+    if ($error == '' && $device_id == '') {
+        $error = "ID perangkat tidak terbaca. Muat ulang halaman lalu coba lagi";
     }
 
     // VALIDASI LOKASI GPS
@@ -163,7 +171,7 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // CEK APAKAH SUDAH PERNAH ABSEN DI EVENT INI
+    // CEK APAKAH SUDAH PERNAH ABSEN DI EVENT INI (by akun)
     if ($error == '') {
         $cek = mysql_query("
             SELECT id_absensi_pegawai FROM absensi_pegawai
@@ -177,14 +185,31 @@ if (isset($_POST['absen'])) {
         }
     }
 
+    // CEK APAKAH PERANGKAT INI SUDAH PERNAH DIPAKAI ABSEN DI EVENT INI
+    // Ini yang nahan orang absenin temennya pakai HP yang sama.
+    // Dicek terpisah dari cek akun di atas, supaya ke-block walau akunnya beda.
+    if ($error == '') {
+        $cekDevice = mysql_query("
+            SELECT id_absensi_pegawai FROM absensi_pegawai
+            WHERE device_id='".mysql_real_escape_string($device_id)."'
+            AND event_id='".mysql_real_escape_string($id_event)."'
+            AND (deletemark IS NULL OR deletemark = 0)
+        ");
+
+        if (mysql_num_rows($cekDevice) > 0) {
+            $error = "Perangkat ini sudah digunakan untuk absen pada event ini";
+        }
+    }
+
     // SIMPAN ABSENSI
     if ($error == '') {
         mysql_query("
-            INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, deletemark)
+            INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, deletemark)
             VALUES (
                 '".mysql_real_escape_string($id_pegawai)."',
                 '".mysql_real_escape_string($id_event)."',
                 '$nowDatetime',
+                '".mysql_real_escape_string($device_id)."',
                 0
             )
         ");
@@ -452,6 +477,7 @@ body {
         <form method="post" id="formAbsen">
             <input type="hidden" name="latitude" id="latitude">
             <input type="hidden" name="longitude" id="longitude">
+            <input type="hidden" name="device_id" id="device_id">
             <input type="hidden" name="absen" value="1">
 
             <div class="field">
@@ -499,6 +525,64 @@ body {
 </div>
 
 <script>
+// ===============================
+// DEVICE ID (1 device = 1x absen per event)
+// ===============================
+// Disimpan di localStorage (utama) + cookie umur panjang (cadangan).
+// ID ini dibuat SEKALI per perangkat/browser dan dipakai terus tiap absen,
+// jadi server bisa nolak kalau device yang sama dipakai buat absenin
+// akun lain di event yang sama.
+function getCookie(name) {
+    const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : null;
+}
+
+function setCookie(name, value, days) {
+    const d = new Date();
+    d.setTime(d.getTime() + (days * 24 * 60 * 60 * 1000));
+    document.cookie = name + '=' + encodeURIComponent(value) + ';expires=' + d.toUTCString() + ';path=/;SameSite=Lax';
+}
+
+function generateUUID() {
+    if (window.crypto && crypto.randomUUID) {
+        return crypto.randomUUID();
+    }
+    // fallback buat browser lama yang ga support crypto.randomUUID
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
+function getDeviceId() {
+    let id = null;
+
+    try {
+        id = localStorage.getItem('rsmn_device_id');
+    } catch (e) {
+        // localStorage bisa diblok di beberapa mode browser tertentu
+    }
+
+    if (!id) {
+        id = getCookie('rsmn_device_id');
+    }
+
+    if (!id) {
+        id = generateUUID();
+    }
+
+    try {
+        localStorage.setItem('rsmn_device_id', id);
+    } catch (e) {}
+
+    setCookie('rsmn_device_id', id, 3650); // simpan 10 tahun
+
+    return id;
+}
+
+document.getElementById('device_id').value = getDeviceId();
+
 // Toggle show/hide password
 document.getElementById('togglePass').addEventListener('click', function(){
     var input = document.getElementById('passwordInput');
@@ -522,6 +606,9 @@ form.addEventListener('submit', function (e) {
     e.preventDefault();
 
     if (isSubmitting) return;
+
+    // pastikan device_id selalu ke-set ulang tiap submit (jaga-jaga)
+    document.getElementById('device_id').value = getDeviceId();
 
     if (!navigator.geolocation) {
         Swal.fire('Error', 'Browser tidak mendukung GPS', 'error');
