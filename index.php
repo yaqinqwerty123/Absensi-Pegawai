@@ -61,6 +61,7 @@ $qEvent = mysql_query("
     WHERE (deletemark IS NULL OR deletemark = 0)
       AND date >= CURDATE()
     ORDER BY date ASC, mulai ASC
+    LIMIT 5
 ");
 while ($ev = mysql_fetch_assoc($qEvent)) {
     $jamLabel = '';
