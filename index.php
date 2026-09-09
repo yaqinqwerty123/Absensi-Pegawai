@@ -31,6 +31,17 @@ $today       = date('Y-m-d');
 $error  = '';
 $sukses = '';
 
+// ambil pesan hasil proses absen sebelumnya (dititipkan via session sebelum redirect)
+// supaya kalau halaman ini di-refresh, yang keulang cuma GET biasa, bukan POST lagi
+if (isset($_SESSION['absen_error'])) {
+    $error = $_SESSION['absen_error'];
+    unset($_SESSION['absen_error']);
+}
+if (isset($_SESSION['absen_sukses'])) {
+    $sukses = $_SESSION['absen_sukses'];
+    unset($_SESSION['absen_sukses']);
+}
+
 // ===============================
 // DATA EVENT (dari list_event_rs)
 // ===============================
@@ -215,6 +226,13 @@ if (isset($_POST['absen'])) {
         ");
         $sukses = "Absen berhasil dicatat";
     }
+
+    // titipkan hasil ke session, lalu redirect (Post-Redirect-Get)
+    // biar kalau halaman ini di-refresh, POST-nya ga keulang & alert ga muncul lagi sendiri
+    $_SESSION['absen_error']  = $error;
+    $_SESSION['absen_sukses'] = $sukses;
+    header('Location: ' . $_SERVER['PHP_SELF']);
+    exit;
 }
 ?>
 <!DOCTYPE html>
