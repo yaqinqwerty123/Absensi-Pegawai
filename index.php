@@ -9,7 +9,7 @@ date_default_timezone_set('Asia/Jakarta');
 // ===============================
 // Radius ini dihitung dari titik lokasi EVENT yang dipilih pegawai
 // (kolom latitude_longitude di tabel list_event_rs), bukan titik tetap.
-$MAX_RADIUS = 300; // meter
+$MAX_RADIUS = 200; // meter
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
@@ -670,7 +670,7 @@ form.addEventListener('submit', function (e) {
 
 <?php if ($error!='') { ?>
 <script>
-Swal.fire({ icon:'error', text:'<?= addslashes($error) ?>' });
+Swal.fire({ icon:'error', title:'Absen Gagal', text:'<?= addslashes($error) ?>' });
 </script>
 <?php } ?>
 
