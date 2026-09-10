@@ -57,26 +57,17 @@ function tandaiTokenTerpakai($t) {
     return (mysql_affected_rows() > 0);
 }
 
-// kalau URL bawa token QR: validasi window waktu DULU, baru cek "udah pernah dipakai belum"
 if (isset($_GET['t'], $_GET['k'])) {
 
     if (cekTokenQR($_GET['t'], $_GET['k'], $QR_TOKEN_WINDOW)) {
+        // JANGAN langsung mark "dipakai" di sini — simpan dulu jadi
+        // "pending", baru dikonfirmasi via JS di confirm_qr.php.
+        // Ini buat menghindari token kepakai duluan oleh preview-fetch
+        // kamera HP (yang ngambil link tanpa jalanin JS).
+        $_SESSION['qr_pending_t'] = (int) $_GET['t'];
 
-        if (tandaiTokenTerpakai($_GET['t'])) {
-            // token fresh & belum pernah dipakai sebelumnya -> sah
-            $_SESSION['qr_ok']      = true;
-            $_SESSION['qr_ok_time'] = time();
-
-            // redirect ke URL bersih (tanpa ?t=&k=) supaya:
-            // 1) token ga nyangkut di address bar / history
-            // 2) kalau halaman ini di-refresh nanti, ga nyoba consume token yang
-            //    sama lagi (yang bakal ke-reject karena udah "terpakai")
-            header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
-            exit;
-        }
-        // kalau sampai sini: token secara waktu masih valid, TAPI udah pernah
-        // dipakai sebelumnya -> kemungkinan besar ini hasil screenshot/forward.
-        // sengaja dibiarkan jatuh ke pengecekan $qrValid di bawah (bakal gagal).
+        header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+        exit;
     }
 }
 
@@ -84,6 +75,28 @@ $qrValid = isset($_SESSION['qr_ok']) && $_SESSION['qr_ok']
     && (time() - $_SESSION['qr_ok_time'] <= $QR_SESSION_WINDOW);
 
 if (!$qrValid) {
+    // ada token pending yg belum dikonfirmasi -> tampilkan loading
+    // sebentar, biar JS yang confirm (bukan langsung nolak duluan)
+    if (isset($_SESSION['qr_pending_t'])) {
+        ?>
+        <!DOCTYPE html>
+        <html><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Memvalidasi...</title></head>
+        <body style="background:#0C447C;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:Arial;margin:0;text-align:center;padding:24px;">
+        <p id="msg">Memvalidasi QR...</p>
+        <script>
+        fetch('confirm_qr.php').then(function(r){ return r.json(); }).then(function(d){
+            if (d.result === 'true') { location.reload(); }
+            else { document.getElementById('msg').innerText = 'QR sudah tidak berlaku, silakan scan ulang.'; }
+        });
+        </script>
+        </body></html>
+        <?php
+        exit;
+    }
+
+    // TIDAK ada token pending & session gak valid -> BLOKIR TOTAL
     unset($_SESSION['qr_ok'], $_SESSION['qr_ok_time']);
     ?>
     <!DOCTYPE html>
@@ -112,7 +125,6 @@ if (!$qrValid) {
     <?php
     exit;
 }
-
 // ===============================
 // KONFIGURASI RADIUS ABSENSI
 // ===============================
