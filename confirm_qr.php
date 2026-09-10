@@ -6,9 +6,15 @@ date_default_timezone_set('Asia/Jakarta');
 define('QR_SECRET_KEY', 'RSMN-GANTI-STRING-RAHASIA-INI-2026');
 $QR_SESSION_WINDOW = 300; // samain dengan yang di index.php
 
+
+
 function tandaiTokenTerpakai($t) {
-    $t = (int) $t;
-    @mysql_query("INSERT INTO qr_token_used (t_value, used_at) VALUES ('".$t."', NOW())");
+    $t   = (int) $t;
+    $sid = session_id(); // beda tiap device/browser yang lagi absen
+
+    @mysql_query("INSERT INTO qr_token_used (t_value, session_id, used_at) 
+                  VALUES ('".$t."', '".mysql_real_escape_string($sid)."', NOW())");
+
     return (mysql_affected_rows() > 0);
 }
 
