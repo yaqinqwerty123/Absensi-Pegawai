@@ -5,11 +5,118 @@ include "koneksi.php";
 date_default_timezone_set('Asia/Jakarta');
 
 // ===============================
+// PROTEKSI QR CODE (anti screenshot / replay)
+// ===============================
+// PENTING: QR_SECRET_KEY di bawah ini WAJIB SAMA PERSIS dengan
+// QR_SECRET_KEY di controller Listevent.php (panel admin).
+// Kalau beda dikit aja, token ga akan pernah valid.
+define('QR_SECRET_KEY', 'RSMN-GANTI-STRING-RAHASIA-INI-2026');
+
+$QR_TOKEN_WINDOW   = 10;  // toleransi (detik) umur token pas di-scan
+$QR_SESSION_WINDOW = 300; // berapa lama (detik) sesi dianggap "sudah scan QR" - 5 menit
+
+function cekTokenQR($t, $k, $window) {
+    if (!is_numeric($t) || empty($k)) return false;
+
+    $expected = hash_hmac('sha256', $t, QR_SECRET_KEY);
+    $tokenCocok = hash_equals($expected, (string)$k);
+    $umur = time() - (int)$t;
+
+    // ==== DEBUG SEMENTARA: hapus/comment lagi kalau udah kelar troubleshooting ====
+    @file_put_contents(__DIR__ . '/qr_debug.log',
+        date('Y-m-d H:i:s') . " | t=$t | server_time=" . time() .
+        " | umur_detik=$umur | window=$window | token_cocok=" . ($tokenCocok ? 'YA' : 'TIDAK') .
+        " | lolos_window=" . ((abs($umur) <= $window) ? 'YA' : 'TIDAK') . "\n",
+        FILE_APPEND
+    );
+    // ==== END DEBUG ====
+
+    if (!$tokenCocok) return false;
+
+    return (abs($umur) <= $window);
+}
+
+// ===============================
+// SATU TOKEN = SATU KALI PAKAI
+// ===============================
+// Kalau cuma ngandelin window waktu (di atas), token yang sama masih
+// bisa dipakai berkali-kali selama masih dalam rentang detiknya.
+// Itu celahnya: screenshot -> kirim ke temen -> temen scan dalam
+// hitungan detik -> tetap keitung "masih fresh".
+//
+// Makanya di sini token yang SAMA PERSIS (nilai t yang sama) cuma
+// boleh berhasil di-consume SEKALI. Percobaan kedua dst pakai t yang
+// sama bakal ditolak, walaupun secara waktu masih "valid".
+function tandaiTokenTerpakai($t) {
+    $t = (int) $t;
+
+    // insert bakal gagal kalau t_value ini udah pernah ada (primary key)
+    // @ dipakai buat nyenyepin warning duplicate-key dari mysql_query()
+    @mysql_query("INSERT INTO qr_token_used (t_value, used_at) VALUES ('".$t."', NOW())");
+
+    return (mysql_affected_rows() > 0);
+}
+
+// kalau URL bawa token QR: validasi window waktu DULU, baru cek "udah pernah dipakai belum"
+if (isset($_GET['t'], $_GET['k'])) {
+
+    if (cekTokenQR($_GET['t'], $_GET['k'], $QR_TOKEN_WINDOW)) {
+
+        if (tandaiTokenTerpakai($_GET['t'])) {
+            // token fresh & belum pernah dipakai sebelumnya -> sah
+            $_SESSION['qr_ok']      = true;
+            $_SESSION['qr_ok_time'] = time();
+
+            // redirect ke URL bersih (tanpa ?t=&k=) supaya:
+            // 1) token ga nyangkut di address bar / history
+            // 2) kalau halaman ini di-refresh nanti, ga nyoba consume token yang
+            //    sama lagi (yang bakal ke-reject karena udah "terpakai")
+            header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+            exit;
+        }
+        // kalau sampai sini: token secara waktu masih valid, TAPI udah pernah
+        // dipakai sebelumnya -> kemungkinan besar ini hasil screenshot/forward.
+        // sengaja dibiarkan jatuh ke pengecekan $qrValid di bawah (bakal gagal).
+    }
+}
+
+$qrValid = isset($_SESSION['qr_ok']) && $_SESSION['qr_ok']
+    && (time() - $_SESSION['qr_ok_time'] <= $QR_SESSION_WINDOW);
+
+if (!$qrValid) {
+    unset($_SESSION['qr_ok'], $_SESSION['qr_ok_time']);
+    ?>
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Scan QR Diperlukan</title>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+        <style>
+            body{font-family:Arial,sans-serif;background:#0C447C;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;margin:0;}
+            .box{max-width:380px;}
+            .box i{font-size:48px;margin-bottom:16px;}
+            .box h2{margin:0 0 10px;font-size:20px;}
+            .box p{font-size:14px;color:rgba(255,255,255,.85);line-height:1.6;}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <i class="fa-solid fa-qrcode"></i>
+            <h2>Scan QR Diperlukan</h2>
+            <p>Halaman absen hanya bisa diakses dengan scan QR Code yang aktif di layar panitia. QR berganti tiap 5 detik dan hanya bisa dipakai SEKALI, jadi tautan lama / hasil screenshot / kiriman dari orang lain tidak akan berfungsi.</p>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+// ===============================
 // KONFIGURASI RADIUS ABSENSI
 // ===============================
-// Radius ini dihitung dari titik lokasi EVENT yang dipilih pegawai
-// (kolom latitude_longitude di tabel list_event_rs), bukan titik tetap.
-$MAX_RADIUS = 200; // meter
+$MAX_RADIUS = 700; // meter
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
@@ -31,8 +138,6 @@ $today       = date('Y-m-d');
 $error  = '';
 $sukses = '';
 
-// ambil pesan hasil proses absen sebelumnya (dititipkan via session sebelum redirect)
-// supaya kalau halaman ini di-refresh, yang keulang cuma GET biasa, bukan POST lagi
 if (isset($_SESSION['absen_error'])) {
     $error = $_SESSION['absen_error'];
     unset($_SESSION['absen_error']);
@@ -45,8 +150,6 @@ if (isset($_SESSION['absen_sukses'])) {
 // ===============================
 // DATA EVENT (dari list_event_rs)
 // ===============================
-// NOTE: kalau mau tampilkan event hari ini SAJA, tinggal tambah
-// "AND date = CURDATE()" di WHERE clause di bawah.
 $eventOpt = '<option value="">Pilih Event</option>';
 $qEvent = mysql_query("
     SELECT
@@ -88,25 +191,18 @@ if (isset($_POST['absen'])) {
     $lng       = isset($_POST['longitude']) ? $_POST['longitude'] : '';
     $device_id = isset($_POST['device_id']) ? trim($_POST['device_id']) : '';
 
-    // VALIDASI INPUT
     if ($hp=='' || $pass_raw=='' || $id_event=='') {
         $error = "Semua field wajib diisi";
     }
 
-    // VALIDASI DEVICE ID
-    // Kalau device_id ga kekirim (JS gagal jalan / localStorage diblok), tolak absen
-    // daripada bikin lubang buat lewatin pengecekan 1-device-1x ini.
     if ($error == '' && $device_id == '') {
         $error = "ID perangkat tidak terbaca. Muat ulang halaman lalu coba lagi";
     }
 
-    // VALIDASI LOKASI GPS
     if ($error == '' && (!is_numeric($lat) || !is_numeric($lng))) {
         $error = "Lokasi tidak terbaca, aktifkan GPS";
     }
 
-    // CEK PEGAWAI: NO HP + PASSWORD
-    // Skema hash & normalisasi HP disamakan persis dengan Login_model::log_model()
     $id_pegawai = '';
     if ($error == '') {
         $passHash = md5(sha1($pass_raw));
@@ -126,7 +222,6 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // AMBIL DATA EVENT TERPILIH (buat cek titik lokasi)
     $eventData = null;
     if ($error == '') {
         $qEv = mysql_query("
@@ -143,18 +238,15 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // VALIDASI JENDELA WAKTU ABSEN
-    // Absen dibuka mulai 1 jam SEBELUM jam mulai event,
-    // dan ditutup begitu lewat jam selesai event.
     if ($error == '' && $eventData) {
-        $eventDate   = $eventData['date'];     // format Y-m-d
-        $jamMulai    = $eventData['mulai'];    // format H:i:s
-        $jamSelesai  = $eventData['selesai'];  // format H:i:s
+        $eventDate   = $eventData['date'];
+        $jamMulai    = $eventData['mulai'];
+        $jamSelesai  = $eventData['selesai'];
 
         if (!empty($jamMulai) && !empty($jamSelesai)) {
             $mulaiTimestamp   = strtotime($eventDate . ' ' . $jamMulai);
             $selesaiTimestamp = strtotime($eventDate . ' ' . $jamSelesai);
-            $bukaTimestamp    = $mulaiTimestamp - 3600; // H-1 jam
+            $bukaTimestamp    = $mulaiTimestamp - 3600;
             $nowTimestamp     = strtotime($nowDatetime);
 
             if ($nowTimestamp < $bukaTimestamp) {
@@ -166,7 +258,6 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // VALIDASI JARAK KE LOKASI EVENT
     if ($error == '' && $eventData) {
         $koordinat = explode(',', $eventData['latitude_longitude']);
 
@@ -183,7 +274,6 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // CEK APAKAH SUDAH PERNAH ABSEN DI EVENT INI (by akun)
     if ($error == '') {
         $cek = mysql_query("
             SELECT id_absensi_pegawai FROM absensi_pegawai
@@ -197,9 +287,6 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // CEK APAKAH PERANGKAT INI SUDAH PERNAH DIPAKAI ABSEN DI EVENT INI
-    // Ini yang nahan orang absenin temennya pakai HP yang sama.
-    // Dicek terpisah dari cek akun di atas, supaya ke-block walau akunnya beda.
     if ($error == '') {
         $cekDevice = mysql_query("
             SELECT id_absensi_pegawai FROM absensi_pegawai
@@ -213,7 +300,6 @@ if (isset($_POST['absen'])) {
         }
     }
 
-    // SIMPAN ABSENSI
     if ($error == '') {
         mysql_query("
             INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, deletemark)
@@ -228,11 +314,9 @@ if (isset($_POST['absen'])) {
         $sukses = "Absen berhasil dicatat";
     }
 
-    // titipkan hasil ke session, lalu redirect (Post-Redirect-Get)
-    // biar kalau halaman ini di-refresh, POST-nya ga keulang & alert ga muncul lagi sendiri
     $_SESSION['absen_error']  = $error;
     $_SESSION['absen_sukses'] = $sukses;
-    header('Location: ' . $_SERVER['PHP_SELF']);
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
     exit;
 }
 ?>
@@ -275,205 +359,73 @@ body {
     background-attachment: fixed;
 }
 
-.wrapper {
-    width: 100%;
-    max-width: 420px;
-}
-
-.brand {
-    text-align: center;
-    color: #fff;
-    margin-bottom: 20px;
-}
-
+.wrapper { width: 100%; max-width: 420px; }
+.brand { text-align: center; color: #fff; margin-bottom: 20px; }
 .brand .logo-circle {
-    width: 64px;
-    height: 64px;
-    margin: 0 auto 12px;
-    border-radius: 50%;
-    background: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 64px; height: 64px; margin: 0 auto 12px;
+    border-radius: 50%; background: #fff;
+    display: flex; align-items: center; justify-content: center;
     box-shadow: 0 8px 24px rgba(0,0,0,.4);
 }
-
-.brand .logo-circle i {
-    font-size: 28px;
-    color: var(--navy);
-}
-
+.brand .logo-circle i { font-size: 28px; color: var(--navy); }
 .brand h1 {
-    font-size: 18px;
-    font-weight: 700;
-    margin: 0 0 2px;
-    letter-spacing: .3px;
+    font-size: 18px; font-weight: 700; margin: 0 0 2px; letter-spacing: .3px;
     text-shadow: 0 2px 8px rgba(0,0,0,.45);
 }
-
 .brand p {
-    font-size: 12.5px;
-    margin: 0;
-    color: rgba(255,255,255,.85);
+    font-size: 12.5px; margin: 0; color: rgba(255,255,255,.85);
     text-shadow: 0 1px 6px rgba(0,0,0,.4);
 }
-
 .card {
-    background: #fff;
-    padding: 28px 24px 26px;
-    border-radius: 20px;
-    box-shadow: 0 20px 45px rgba(0,0,0,.25);
-    animation: fadeIn .45s ease;
+    background: #fff; padding: 28px 24px 26px; border-radius: 20px;
+    box-shadow: 0 20px 45px rgba(0,0,0,.25); animation: fadeIn .45s ease;
 }
-
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(18px); }
-    to   { opacity: 1; transform: none; }
-}
-
-.card h2 {
-    text-align: center;
-    font-size: 17px;
-    font-weight: 600;
-    color: #1a1a1a;
-    margin: 0 0 4px;
-}
-
-.card .subtitle {
-    text-align: center;
-    font-size: 12.5px;
-    color: #8a93a3;
-    margin: 0 0 22px;
-}
-
-.field {
-    margin-bottom: 16px;
-}
-
-.field label {
-    display: block;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: #4a5568;
-    margin-bottom: 6px;
-}
-
+@keyframes fadeIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+.card h2 { text-align: center; font-size: 17px; font-weight: 600; color: #1a1a1a; margin: 0 0 4px; }
+.card .subtitle { text-align: center; font-size: 12.5px; color: #8a93a3; margin: 0 0 22px; }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 12.5px; font-weight: 600; color: #4a5568; margin-bottom: 6px; }
 .input-group {
-    position: relative;
-    display: flex;
-    align-items: center;
-    border: 1.5px solid #E3E8EF;
-    border-radius: 12px;
-    background: var(--bg-soft);
+    position: relative; display: flex; align-items: center;
+    border: 1.5px solid #E3E8EF; border-radius: 12px; background: var(--bg-soft);
     transition: border-color .15s ease, box-shadow .15s ease;
 }
-
 .input-group:focus-within {
-    border-color: var(--navy);
-    box-shadow: 0 0 0 3px rgba(12,68,124,.12);
-    background: #fff;
+    border-color: var(--navy); box-shadow: 0 0 0 3px rgba(12,68,124,.12); background: #fff;
 }
-
-.input-group .icon {
-    width: 44px;
-    text-align: center;
-    color: #97A3B6;
-    font-size: 15px;
-    flex-shrink: 0;
+.input-group .icon { width: 44px; text-align: center; color: #97A3B6; font-size: 15px; flex-shrink: 0; }
+.input-group input, .input-group select {
+    flex: 1; border: none; background: transparent; outline: none;
+    padding: 13px 12px 13px 0; font-size: 14.5px; font-family: inherit;
+    color: #1f2937; width: 100%; appearance: none; -webkit-appearance: none;
 }
-
-.input-group input,
-.input-group select {
-    flex: 1;
-    border: none;
-    background: transparent;
-    outline: none;
-    padding: 13px 12px 13px 0;
-    font-size: 14.5px;
-    font-family: inherit;
-    color: #1f2937;
-    width: 100%;
-    appearance: none;
-    -webkit-appearance: none;
-}
-
-.input-group select {
-    padding-right: 12px;
-    cursor: pointer;
-}
-
+.input-group select { padding-right: 12px; cursor: pointer; }
 .input-group .toggle-pass {
-    width: 44px;
-    text-align: center;
-    color: #97A3B6;
-    cursor: pointer;
-    font-size: 15px;
-    flex-shrink: 0;
-    background: none;
-    border: none;
+    width: 44px; text-align: center; color: #97A3B6; cursor: pointer;
+    font-size: 15px; flex-shrink: 0; background: none; border: none;
 }
-
-.select-wrap {
-    position: relative;
-}
-
+.select-wrap { position: relative; }
 .select-wrap::after {
-    content: "\f078";
-    font-family: "Font Awesome 6 Free";
-    font-weight: 900;
-    position: absolute;
-    right: 14px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: #97A3B6;
-    font-size: 11px;
-    pointer-events: none;
+    content: "\f078"; font-family: "Font Awesome 6 Free"; font-weight: 900;
+    position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+    color: #97A3B6; font-size: 11px; pointer-events: none;
 }
-
 .btn-absen {
-    width: 100%;
-    padding: 15px;
-    border: none;
-    border-radius: 12px;
-    font-size: 15.5px;
-    font-weight: 700;
-    letter-spacing: .3px;
-    background: linear-gradient(135deg, var(--navy), var(--navy-dark));
-    color: #fff;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
+    width: 100%; padding: 15px; border: none; border-radius: 12px;
+    font-size: 15.5px; font-weight: 700; letter-spacing: .3px;
+    background: linear-gradient(135deg, var(--navy), var(--navy-dark)); color: #fff;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
     box-shadow: 0 10px 20px rgba(12,68,124,.28);
-    transition: transform .1s ease, opacity .15s ease;
-    margin-top: 6px;
+    transition: transform .1s ease, opacity .15s ease; margin-top: 6px;
 }
-
-.btn-absen:active {
-    transform: scale(.98);
-}
-
-.btn-absen:disabled {
-    opacity: .65;
-    cursor: not-allowed;
-}
-
+.btn-absen:active { transform: scale(.98); }
+.btn-absen:disabled { opacity: .65; cursor: not-allowed; }
 .gps-note {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11.5px;
-    color: #97A3B6;
-    justify-content: center;
-    margin-top: 14px;
+    display: flex; align-items: center; gap: 6px; font-size: 11.5px;
+    color: #97A3B6; justify-content: center; margin-top: 14px;
 }
-
 .footer-note {
-    text-align: center;
-    color: rgba(255,255,255,.55);
-    font-size: 11.5px;
-    margin-top: 18px;
+    text-align: center; color: rgba(255,255,255,.55); font-size: 11.5px; margin-top: 18px;
 }
 </style>
 </head>
@@ -544,13 +496,6 @@ body {
 </div>
 
 <script>
-// ===============================
-// DEVICE ID (1 device = 1x absen per event)
-// ===============================
-// Disimpan di localStorage (utama) + cookie umur panjang (cadangan).
-// ID ini dibuat SEKALI per perangkat/browser dan dipakai terus tiap absen,
-// jadi server bisa nolak kalau device yang sama dipakai buat absenin
-// akun lain di event yang sama.
 function getCookie(name) {
     const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
     return match ? decodeURIComponent(match[2]) : null;
@@ -566,7 +511,6 @@ function generateUUID() {
     if (window.crypto && crypto.randomUUID) {
         return crypto.randomUUID();
     }
-    // fallback buat browser lama yang ga support crypto.randomUUID
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -576,33 +520,16 @@ function generateUUID() {
 
 function getDeviceId() {
     let id = null;
-
-    try {
-        id = localStorage.getItem('rsmn_device_id');
-    } catch (e) {
-        // localStorage bisa diblok di beberapa mode browser tertentu
-    }
-
-    if (!id) {
-        id = getCookie('rsmn_device_id');
-    }
-
-    if (!id) {
-        id = generateUUID();
-    }
-
-    try {
-        localStorage.setItem('rsmn_device_id', id);
-    } catch (e) {}
-
-    setCookie('rsmn_device_id', id, 3650); // simpan 10 tahun
-
+    try { id = localStorage.getItem('rsmn_device_id'); } catch (e) {}
+    if (!id) { id = getCookie('rsmn_device_id'); }
+    if (!id) { id = generateUUID(); }
+    try { localStorage.setItem('rsmn_device_id', id); } catch (e) {}
+    setCookie('rsmn_device_id', id, 3650);
     return id;
 }
 
 document.getElementById('device_id').value = getDeviceId();
 
-// Toggle show/hide password
 document.getElementById('togglePass').addEventListener('click', function(){
     var input = document.getElementById('passwordInput');
     var icon  = this.querySelector('i');
@@ -623,10 +550,8 @@ let isSubmitting = false;
 
 form.addEventListener('submit', function (e) {
     e.preventDefault();
-
     if (isSubmitting) return;
 
-    // pastikan device_id selalu ke-set ulang tiap submit (jaga-jaga)
     document.getElementById('device_id').value = getDeviceId();
 
     if (!navigator.geolocation) {
