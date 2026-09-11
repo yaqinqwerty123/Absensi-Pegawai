@@ -144,6 +144,60 @@ function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     return $earthRadius * $c;
 }
 
+// ===============================
+// KOMPRESI FOTO
+// ===============================
+// Resize (kalau lebar > $maxWidth) + re-encode ke JPEG dengan quality
+// yang diturunin bertahap sampai ukuran file di bawah $maxSizeKB.
+// Selalu disimpan sbg .jpg apapun format aslinya (jpg/png), biar
+// kompresinya konsisten & predictable.
+function kompresFoto($sourcePath, $targetPath, $maxWidth = 1280, $quality = 75, $maxSizeKB = 300) {
+    if (!extension_loaded('gd')) return false;
+
+    $info = @getimagesize($sourcePath);
+    if (!$info) return false;
+
+    switch ($info[2]) {
+        case IMAGETYPE_JPEG:
+            $img = @imagecreatefromjpeg($sourcePath);
+            break;
+        case IMAGETYPE_PNG:
+            $img = @imagecreatefrompng($sourcePath);
+            break;
+        default:
+            return false;
+    }
+    if (!$img) return false;
+
+    $origWidth  = imagesx($img);
+    $origHeight = imagesy($img);
+
+    // resize proporsional kalau kelebaran
+    if ($origWidth > $maxWidth) {
+        $newWidth  = $maxWidth;
+        $newHeight = intval($origHeight * ($maxWidth / $origWidth));
+
+        $resized = imagecreatetruecolor($newWidth, $newHeight);
+        // background putih, biar PNG transparan ga jadi item pas dijadiin JPEG
+        imagefill($resized, 0, 0, imagecolorallocate($resized, 255, 255, 255));
+        imagecopyresampled($resized, $img, 0, 0, 0, 0, $newWidth, $newHeight, $origWidth, $origHeight);
+
+        imagedestroy($img);
+        $img = $resized;
+    }
+
+    // simpan, turunin quality bertahap kalau masih di atas target ukuran
+    $q = $quality;
+    do {
+        imagejpeg($img, $targetPath, $q);
+        $sizeKB = filesize($targetPath) / 1024;
+        $q -= 10;
+    } while ($sizeKB > $maxSizeKB && $q >= 30);
+
+    imagedestroy($img);
+    return true;
+}
+
 $nowDatetime = date('Y-m-d H:i:s');
 $today       = date('Y-m-d');
 
@@ -312,14 +366,77 @@ if (isset($_POST['absen'])) {
         }
     }
 
+    // ===============================
+    // VALIDASI & UPLOAD FOTO
+    // ===============================
+    $fotoPathDB = '';
+
+    if ($error == '') {
+        if (!isset($_FILES['foto_pegawai']) || $_FILES['foto_pegawai']['error'] !== UPLOAD_ERR_OK) {
+            $error = "Foto wajib diambil / gagal diupload";
+        } elseif ($_FILES['foto_pegawai']['size'] > 5 * 1024 * 1024) {
+            $error = "Ukuran foto maksimal 5MB";
+        } else {
+            $extAllowed = array('jpg', 'jpeg', 'png');
+            $ext = strtolower(pathinfo($_FILES['foto_pegawai']['name'], PATHINFO_EXTENSION));
+
+            if (!in_array($ext, $extAllowed)) {
+                $error = "Format foto harus jpg/jpeg/png";
+            } elseif (@getimagesize($_FILES['foto_pegawai']['tmp_name']) === false) {
+                // pastikan file beneran gambar, bukan file lain yg diganti ekstensi
+                $error = "File yang diupload bukan gambar yang valid";
+            }
+        }
+    }
+
+    if ($error == '') {
+        // nama folder: (NamaEvent_TanggalEvent), dibersihkan dari karakter aneh
+        $namaFolderEvent = preg_replace('/[^A-Za-z0-9]+/', '_', $eventData['nama_event']);
+        $namaFolderEvent = trim($namaFolderEvent, '_');
+        $tanggalFolder   = $eventData['date']; // format Y-m-d dari DB
+
+        $folderRelatif = 'assets/foto_karyawan/' . $namaFolderEvent . '_' . $tanggalFolder . '/';
+        $folderAbsolut = __DIR__ . '/' . $folderRelatif;
+
+        if (!is_dir($folderAbsolut)) {
+            @mkdir($folderAbsolut, 0755, true);
+        }
+
+        if (!is_dir($folderAbsolut) || !is_writable($folderAbsolut)) {
+            $error = "Gagal membuat folder penyimpanan foto, hubungi admin";
+        } else {
+            // selalu disimpan sbg .jpg (hasil kompresi), apapun ekstensi aslinya
+            $namaFile   = $id_pegawai . '_' . date('His') . '_' . uniqid() . '.jpg';
+            $targetPath = $folderAbsolut . $namaFile;
+
+            $berhasilKompres = kompresFoto($_FILES['foto_pegawai']['tmp_name'], $targetPath, 1280, 75, 300);
+
+            if (!$berhasilKompres) {
+                // fallback: kalau GD gagal/gak ada, simpan file asli tanpa kompresi
+                // drpd absen gagal total gara-gara masalah teknis kompresi
+                $namaFile   = $id_pegawai . '_' . date('His') . '_' . uniqid() . '.' . $ext;
+                $targetPath = $folderAbsolut . $namaFile;
+
+                if (!move_uploaded_file($_FILES['foto_pegawai']['tmp_name'], $targetPath)) {
+                    $error = "Gagal menyimpan foto, silakan coba lagi";
+                }
+            }
+
+            if ($error == '') {
+                $fotoPathDB = $folderRelatif . $namaFile; // ini yg disimpan ke DB
+            }
+        }
+    }
+
     if ($error == '') {
         mysql_query("
-            INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, deletemark)
+            INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, foto_pegawai, deletemark)
             VALUES (
                 '".mysql_real_escape_string($id_pegawai)."',
                 '".mysql_real_escape_string($id_event)."',
                 '$nowDatetime',
                 '".mysql_real_escape_string($device_id)."',
+                '".mysql_real_escape_string($fotoPathDB)."',
                 0
             )
         ");
@@ -457,7 +574,7 @@ body {
         <h2>Absen Kehadiran</h2>
         <p class="subtitle">Isi data di bawah untuk mencatat kehadiran Anda</p>
 
-        <form method="post" id="formAbsen">
+        <form method="post" id="formAbsen" enctype="multipart/form-data">
             <input type="hidden" name="latitude" id="latitude">
             <input type="hidden" name="longitude" id="longitude">
             <input type="hidden" name="device_id" id="device_id">
@@ -491,6 +608,16 @@ body {
                     </select>
                 </div>
             </div>
+
+            <div class="field">
+                <label>Foto Kehadiran</label>
+                <div class="input-group" style="padding:10px 12px;">
+                    <input type="file" name="foto_pegawai" id="fotoPegawai" accept="image/*" capture="environment" required style="border:none;background:transparent;width:100%;font-size:13px;">
+                </div>
+                <small class="form-text" style="font-size:11px;color:#97A3B6;">Ambil foto langsung saat absen (kamera akan terbuka otomatis di HP).</small>
+                <img id="previewFoto" style="display:none;max-width:100%;border-radius:10px;margin-top:8px;">
+            </div>
+
 
             <button type="submit" class="btn-absen" id="btnAbsen">
                 <i class="fa-solid fa-location-dot"></i>
@@ -553,6 +680,17 @@ document.getElementById('togglePass').addEventListener('click', function(){
         input.type = 'password';
         icon.classList.remove('fa-eye-slash');
         icon.classList.add('fa-eye');
+    }
+});
+
+document.getElementById('fotoPegawai').addEventListener('change', function(){
+    var file = this.files[0];
+    var img = document.getElementById('previewFoto');
+    if (file) {
+        img.src = URL.createObjectURL(file);
+        img.style.display = 'block';
+    } else {
+        img.style.display = 'none';
     }
 });
 
