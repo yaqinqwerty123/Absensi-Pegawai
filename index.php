@@ -151,7 +151,7 @@ if (!$qrValid) {
 // ===============================
 // KONFIGURASI RADIUS ABSENSI
 // ===============================
-$MAX_RADIUS = 100; // meter
+$MAX_RADIUS = 300; // meter
 
 // ==========================================================
 // KENAPA ADA $GPS_ACCURACY_BUFFER_MAX
@@ -159,11 +159,11 @@ $MAX_RADIUS = 100; // meter
 // GPS HP itu ga pernah presisi 100%. Browser ngasih tau sendiri lewat
 // pos.coords.accuracy (radius ketidakpastian dalam meter) - makin
 // jelek sinyal (dalam gedung, deket tembok/beton, cuaca dll), makin
-// gede angkanya. Kalau radius absen udah diperketat jadi 100m TAPI
-// toleransi ini ga ada, peserta yang beneran ada di lokasi bisa aja
-// keukur "di luar radius" padahal cuma gara-gara GPS-nya nyimpang
-// dikit - persis kasus false-reject kayak masalah QR kemarin, tapi
-// versi GPS.
+// gede angkanya. Kalau radius absen udah diperketat TAPI toleransi
+// ini ga ada, peserta yang beneran ada di lokasi bisa aja keukur
+// "di luar radius" padahal cuma gara-gara GPS-nya nyimpang dikit -
+// apalagi di dalam gedung RS (banyak tembok/beton/lantai bertingkat),
+// GPS drift 100-200m itu hal yang WAJAR, bukan anomali.
 //
 // Makanya jarak yang dihitung dibandingin ke "radius efektif" =
 // $MAX_RADIUS + akurasi GPS device (dikirim browser), BUKAN cuma
@@ -171,7 +171,7 @@ $MAX_RADIUS = 100; // meter
 // kirim angka akurasi ngawur biar radiusnya kebuka lebar), buffer ini
 // DIBATASI maksimal $GPS_ACCURACY_BUFFER_MAX meter aja, jadi radius
 // efektif paling longgar tetap $MAX_RADIUS + buffer max.
-$GPS_ACCURACY_BUFFER_MAX = 50; // meter, plafon buffer dari akurasi GPS
+$GPS_ACCURACY_BUFFER_MAX = 100; // meter, plafon buffer dari akurasi GPS
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
