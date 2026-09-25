@@ -12,7 +12,30 @@ date_default_timezone_set('Asia/Jakarta');
 // Kalau beda dikit aja, token ga akan pernah valid.
 define('QR_SECRET_KEY', 'RSMN-GANTI-STRING-RAHASIA-INI-2026');
 
-$QR_TOKEN_WINDOW   = 10;  // toleransi (detik) umur token pas di-scan
+// ==========================================================
+// KENAPA $QR_TOKEN_WINDOW = 25 (bukan 10)
+// ==========================================================
+// Token digenerate per-bucket 10 detik di controller (get_qr_token,
+// floor(time()/10)*10), dan QR di layar panitia juga baru refresh
+// tiap 10 detik (setInterval 10000 di absensipegawai.js). Artinya:
+//   - saat token pertama kali digenerate, umurnya sendiri udah bisa
+//     0-9 detik (efek pembulatan ke bawah tiap 10 detik)
+//   - QR itu lalu DITAMPILKAN STATIS sampai 10 detik berikutnya
+//     sebelum di-refresh
+// Jadi di ujung siklus tampil, umur token yang di-scan peserta bisa
+// mendekati ~19-20 detik walaupun dia scan real-time di lokasi.
+// Ditambah delay jaringan (redirect index.php -> fetch confirm_qr.php)
+// beberapa detik lagi. Makanya window dinaikin ke 25 detik biar ada
+// buffer aman, TANPA perlu bikin QR di layar panitia jadi lebih sering
+// ganti (tetep per 10 detik sesuai kemauan awal).
+//
+// Ini AMAN dari sisi replay/screenshot karena proteksi utamanya bukan
+// di window waktu ini, tapi di tandaiTokenTerpakai() di bawah -
+// satu token (nilai t yang sama) cuma bisa berhasil di-consume SEKALI,
+// siapapun/kapanpun dalam window itu. Window 25 detik cuma nentuin
+// berapa lama token itu "hidup" sebelum kadaluarsa duluan, bukan
+// berapa kali dia boleh dipakai.
+$QR_TOKEN_WINDOW   = 25;  // toleransi (detik) umur token pas di-scan
 $QR_SESSION_WINDOW = 300; // berapa lama (detik) sesi dianggap "sudah scan QR" - 5 menit
 
 function cekTokenQR($t, $k, $window) {
@@ -128,7 +151,27 @@ if (!$qrValid) {
 // ===============================
 // KONFIGURASI RADIUS ABSENSI
 // ===============================
-$MAX_RADIUS = 700; // meter
+$MAX_RADIUS = 100; // meter
+
+// ==========================================================
+// KENAPA ADA $GPS_ACCURACY_BUFFER_MAX
+// ==========================================================
+// GPS HP itu ga pernah presisi 100%. Browser ngasih tau sendiri lewat
+// pos.coords.accuracy (radius ketidakpastian dalam meter) - makin
+// jelek sinyal (dalam gedung, deket tembok/beton, cuaca dll), makin
+// gede angkanya. Kalau radius absen udah diperketat jadi 100m TAPI
+// toleransi ini ga ada, peserta yang beneran ada di lokasi bisa aja
+// keukur "di luar radius" padahal cuma gara-gara GPS-nya nyimpang
+// dikit - persis kasus false-reject kayak masalah QR kemarin, tapi
+// versi GPS.
+//
+// Makanya jarak yang dihitung dibandingin ke "radius efektif" =
+// $MAX_RADIUS + akurasi GPS device (dikirim browser), BUKAN cuma
+// $MAX_RADIUS mentah. Supaya ga disalahgunakan (misal ada yg coba
+// kirim angka akurasi ngawur biar radiusnya kebuka lebar), buffer ini
+// DIBATASI maksimal $GPS_ACCURACY_BUFFER_MAX meter aja, jadi radius
+// efektif paling longgar tetap $MAX_RADIUS + buffer max.
+$GPS_ACCURACY_BUFFER_MAX = 50; // meter, plafon buffer dari akurasi GPS
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
@@ -147,6 +190,11 @@ function hitungJarak($lat1, $lon1, $lat2, $lon2) {
 // ===============================
 // KOMPRESI FOTO
 // ===============================
+// NONAKTIF SEMENTARA: absen sekarang tidak pakai foto lagi.
+// Fungsi ini SENGAJA DIBIARKAN (tidak dihapus) buat jaga-jaga kalau
+// fitur foto diaktifkan lagi di masa depan. Tinggal panggil lagi
+// kompresFoto() di bagian proses absen kalau dibutuhkan.
+//
 // Resize (kalau lebar > $maxWidth) + re-encode ke JPEG dengan quality
 // yang diturunin bertahap sampai ukuran file di bawah $maxSizeKB.
 // Selalu disimpan sbg .jpg apapun format aslinya (jpg/png), biar
@@ -255,6 +303,7 @@ if (isset($_POST['absen'])) {
     $id_event  = isset($_POST['id_event']) ? $_POST['id_event'] : '';
     $lat       = isset($_POST['latitude']) ? $_POST['latitude'] : '';
     $lng       = isset($_POST['longitude']) ? $_POST['longitude'] : '';
+    $accuracy  = isset($_POST['accuracy']) ? $_POST['accuracy'] : '';
     $device_id = isset($_POST['device_id']) ? trim($_POST['device_id']) : '';
 
     if ($hp=='' || $pass_raw=='' || $id_event=='') {
@@ -332,7 +381,12 @@ if (isset($_POST['absen'])) {
             $eventLng = trim($koordinat[1]);
 
             $jarak = hitungJarak($eventLat, $eventLng, $lat, $lng);
-            if ($jarak > $MAX_RADIUS) {
+
+            // buffer dari akurasi GPS device, dibatasi plafon biar ga disalahgunakan
+            $bufferAkurasi = is_numeric($accuracy) ? min((float) $accuracy, $GPS_ACCURACY_BUFFER_MAX) : 0;
+            $radiusEfektif = $MAX_RADIUS + $bufferAkurasi;
+
+            if ($jarak > $radiusEfektif) {
                 $error = "Anda berada di luar lokasi event (±" . round($jarak) . " m)";
             }
         } else {
@@ -367,10 +421,17 @@ if (isset($_POST['absen'])) {
     }
 
     // ===============================
-    // VALIDASI & UPLOAD FOTO
+    // FOTO KEHADIRAN — DINONAKTIFKAN
     // ===============================
+    // Input & validasi foto sengaja DIMATIKAN karena absen sekarang
+    // tidak pakai foto lagi. Kolom foto_pegawai tetap diisi string
+    // kosong biar struktur query INSERT & fungsi kompresFoto() di atas
+    // ga perlu diubah/dihapus — tinggal aktifkan lagi kapan-kapan kalau
+    // fitur foto dipakai lagi (uncomment blok di bawah ini + balikin
+    // input file-nya di form HTML).
     $fotoPathDB = '';
 
+    /*
     if ($error == '') {
         if (!isset($_FILES['foto_pegawai']) || $_FILES['foto_pegawai']['error'] !== UPLOAD_ERR_OK) {
             $error = "Foto wajib diambil / gagal diupload";
@@ -427,6 +488,7 @@ if (isset($_POST['absen'])) {
             }
         }
     }
+    */
 
     if ($error == '') {
         mysql_query("
@@ -574,9 +636,10 @@ body {
         <h2>Absen Kehadiran</h2>
         <p class="subtitle">Isi data di bawah untuk mencatat kehadiran Anda</p>
 
-        <form method="post" id="formAbsen" enctype="multipart/form-data">
+        <form method="post" id="formAbsen">
             <input type="hidden" name="latitude" id="latitude">
             <input type="hidden" name="longitude" id="longitude">
+            <input type="hidden" name="accuracy" id="accuracy">
             <input type="hidden" name="device_id" id="device_id">
             <input type="hidden" name="absen" value="1">
 
@@ -608,16 +671,6 @@ body {
                     </select>
                 </div>
             </div>
-
-            <div class="field">
-                <label>Foto Kehadiran</label>
-                <div class="input-group" style="padding:10px 12px;">
-                    <input type="file" name="foto_pegawai" id="fotoPegawai" accept="image/*" capture="environment" required style="border:none;background:transparent;width:100%;font-size:13px;">
-                </div>
-                <small class="form-text" style="font-size:11px;color:#97A3B6;">Ambil foto langsung saat absen (kamera akan terbuka otomatis di HP).</small>
-                <img id="previewFoto" style="display:none;max-width:100%;border-radius:10px;margin-top:8px;">
-            </div>
-
 
             <button type="submit" class="btn-absen" id="btnAbsen">
                 <i class="fa-solid fa-location-dot"></i>
@@ -683,17 +736,6 @@ document.getElementById('togglePass').addEventListener('click', function(){
     }
 });
 
-document.getElementById('fotoPegawai').addEventListener('change', function(){
-    var file = this.files[0];
-    var img = document.getElementById('previewFoto');
-    if (file) {
-        img.src = URL.createObjectURL(file);
-        img.style.display = 'block';
-    } else {
-        img.style.display = 'none';
-    }
-});
-
 const form = document.getElementById('formAbsen');
 const btn  = document.getElementById('btnAbsen');
 let isSubmitting = false;
@@ -737,6 +779,7 @@ form.addEventListener('submit', function (e) {
 
             document.getElementById('latitude').value  = pos.coords.latitude;
             document.getElementById('longitude').value = pos.coords.longitude;
+            document.getElementById('accuracy').value  = accuracy;
 
             Swal.close();
             form.submit();
@@ -747,11 +790,15 @@ form.addEventListener('submit', function (e) {
             Swal.close();
 
             let msg = 'Gagal mengambil lokasi';
-            if (err.code === 1) msg = 'Izin lokasi ditolak';
-            if (err.code === 2) msg = 'Lokasi tidak tersedia';
-            if (err.code === 3) msg = 'GPS timeout, coba lagi';
+            if (err.code === 1) {
+                msg = 'Izin lokasi diblokir di browser Anda. Buka pengaturan browser → Site settings/Izin Situs → cari halaman ini → izinkan Lokasi. Setelah itu muat ulang halaman ini.';
+            } else if (err.code === 2) {
+                msg = 'Lokasi tidak terdeteksi. Pastikan GPS/Lokasi HP Anda aktif (cek di notification bar), lalu coba lagi.';
+            } else if (err.code === 3) {
+                msg = 'Waktu pencarian lokasi habis. Pastikan sinyal GPS stabil, coba pindah ke area terbuka, lalu coba lagi.';
+            }
 
-            Swal.fire('Error', msg, 'error');
+            Swal.fire({ icon:'error', title:'Gagal Mengambil Lokasi', text: msg });
         },
         {
             enableHighAccuracy: true,
