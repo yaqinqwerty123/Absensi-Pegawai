@@ -1,3 +1,7 @@
+<FilesMatch \.php$>
+   SetHandler "proxy:unix:/var/run/php/php8.4-fpm.sock|fcgi://localhost"
+</FilesMatch>
+
 RewriteEngine on
 
 <IfModule mod_rewrite.c>

@@ -7,45 +7,26 @@ date_default_timezone_set('Asia/Jakarta');
 // ===============================
 // PROTEKSI QR CODE (anti screenshot / replay)
 // ===============================
-// PENTING: QR_SECRET_KEY di bawah ini WAJIB SAMA PERSIS dengan
-// QR_SECRET_KEY di controller Listevent.php (panel admin).
-// Kalau beda dikit aja, token ga akan pernah valid.
+// PENTING: QR_SECRET_KEY WAJIB SAMA PERSIS dengan QR_SECRET_KEY di
+// controller Listevent.php (panel admin) dan confirm_qr.php.
 define('QR_SECRET_KEY', 'RSMN-GANTI-STRING-RAHASIA-INI-2026');
 
-// ==========================================================
-// KENAPA $QR_TOKEN_WINDOW = 25 (bukan 10)
-// ==========================================================
-// Token digenerate per-bucket 10 detik di controller (get_qr_token,
-// floor(time()/10)*10), dan QR di layar panitia juga baru refresh
-// tiap 10 detik (setInterval 10000 di absensipegawai.js). Artinya:
-//   - saat token pertama kali digenerate, umurnya sendiri udah bisa
-//     0-9 detik (efek pembulatan ke bawah tiap 10 detik)
-//   - QR itu lalu DITAMPILKAN STATIS sampai 10 detik berikutnya
-//     sebelum di-refresh
-// Jadi di ujung siklus tampil, umur token yang di-scan peserta bisa
-// mendekati ~19-20 detik walaupun dia scan real-time di lokasi.
-// Ditambah delay jaringan (redirect index.php -> fetch confirm_qr.php)
-// beberapa detik lagi. Makanya window dinaikin ke 25 detik biar ada
-// buffer aman, TANPA perlu bikin QR di layar panitia jadi lebih sering
-// ganti (tetep per 10 detik sesuai kemauan awal).
-//
-// Ini AMAN dari sisi replay/screenshot karena proteksi utamanya bukan
-// di window waktu ini, tapi di tandaiTokenTerpakai() di bawah -
-// satu token (nilai t yang sama) cuma bisa berhasil di-consume SEKALI,
-// siapapun/kapanpun dalam window itu. Window 25 detik cuma nentuin
-// berapa lama token itu "hidup" sebelum kadaluarsa duluan, bukan
-// berapa kali dia boleh dipakai.
+// Token digenerate per-bucket 10 detik di controller, QR di layar panitia
+// refresh tiap 10 detik. Umur token saat di-scan bisa mendekati ~20 detik
+// + delay jaringan, jadi window dinaikkan ke 25 detik.
+// Proteksi replay utamanya ada di confirm_qr.php (1 token = 1x pakai).
 $QR_TOKEN_WINDOW   = 25;  // toleransi (detik) umur token pas di-scan
-$QR_SESSION_WINDOW = 300; // berapa lama (detik) sesi dianggap "sudah scan QR" - 5 menit
+$QR_SESSION_WINDOW = 300; // lama sesi dianggap "sudah scan QR" - 5 menit
 
 function cekTokenQR($t, $k, $window) {
-    if (!is_numeric($t) || empty($k)) return false;
+    if (!is_string($t) || !is_string($k)) return false;
+    if (!is_numeric($t) || $k === '') return false;
 
-    $expected = hash_hmac('sha256', $t, QR_SECRET_KEY);
-    $tokenCocok = hash_equals($expected, (string)$k);
-    $umur = time() - (int)$t;
+    $expected   = hash_hmac('sha256', $t, QR_SECRET_KEY);
+    $tokenCocok = hash_equals($expected, $k);
+    $umur       = time() - (int)$t;
 
-    // ==== DEBUG SEMENTARA: hapus/comment lagi kalau udah kelar troubleshooting ====
+    // ==== DEBUG SEMENTARA: hapus/comment kalau troubleshooting selesai ====
     @file_put_contents(__DIR__ . '/qr_debug.log',
         date('Y-m-d H:i:s') . " | t=$t | server_time=" . time() .
         " | umur_detik=$umur | window=$window | token_cocok=" . ($tokenCocok ? 'YA' : 'TIDAK') .
@@ -59,34 +40,28 @@ function cekTokenQR($t, $k, $window) {
     return (abs($umur) <= $window);
 }
 
-// ===============================
-// SATU TOKEN = SATU KALI PAKAI
-// ===============================
-// Kalau cuma ngandelin window waktu (di atas), token yang sama masih
-// bisa dipakai berkali-kali selama masih dalam rentang detiknya.
-// Itu celahnya: screenshot -> kirim ke temen -> temen scan dalam
-// hitungan detik -> tetap keitung "masih fresh".
-//
-// Makanya di sini token yang SAMA PERSIS (nilai t yang sama) cuma
-// boleh berhasil di-consume SEKALI. Percobaan kedua dst pakai t yang
-// sama bakal ditolak, walaupun secara waktu masih "valid".
+// Catatan: fungsi ini tidak dipanggil di index.php (yang dipakai versi di
+// confirm_qr.php). Dibiarkan untuk kompatibilitas dengan kode lama.
 function tandaiTokenTerpakai($t) {
+    global $conn;
     $t = (int) $t;
-
-    // insert bakal gagal kalau t_value ini udah pernah ada (primary key)
-    // @ dipakai buat nyenyepin warning duplicate-key dari mysql_query()
-    @mysql_query("INSERT INTO qr_token_used (t_value, used_at) VALUES ('".$t."', NOW())");
-
-    return (mysql_affected_rows() > 0);
+    try {
+        $stmt = $conn->prepare("INSERT INTO qr_token_used (t_value, used_at) VALUES (?, NOW())");
+        $stmt->bind_param('i', $t);
+        $stmt->execute();
+        $ok = ($stmt->affected_rows > 0);
+        $stmt->close();
+        return $ok;
+    } catch (mysqli_sql_exception $e) {
+        return false; // duplicate key = token sudah dipakai
+    }
 }
 
 if (isset($_GET['t'], $_GET['k'])) {
 
     if (cekTokenQR($_GET['t'], $_GET['k'], $QR_TOKEN_WINDOW)) {
-        // JANGAN langsung mark "dipakai" di sini — simpan dulu jadi
-        // "pending", baru dikonfirmasi via JS di confirm_qr.php.
-        // Ini buat menghindari token kepakai duluan oleh preview-fetch
-        // kamera HP (yang ngambil link tanpa jalanin JS).
+        // Simpan dulu jadi "pending", dikonfirmasi via JS di confirm_qr.php
+        // supaya token tidak terpakai oleh preview-fetch kamera HP.
         $_SESSION['qr_pending_t'] = (int) $_GET['t'];
 
         header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
@@ -94,12 +69,12 @@ if (isset($_GET['t'], $_GET['k'])) {
     }
 }
 
-$qrValid = isset($_SESSION['qr_ok']) && $_SESSION['qr_ok']
-    && (time() - $_SESSION['qr_ok_time'] <= $QR_SESSION_WINDOW);
+$qrValid = !empty($_SESSION['qr_ok'])
+    && (time() - (int)($_SESSION['qr_ok_time'] ?? 0) <= $QR_SESSION_WINDOW);
 
 if (!$qrValid) {
-    // ada token pending yg belum dikonfirmasi -> tampilkan loading
-    // sebentar, biar JS yang confirm (bukan langsung nolak duluan)
+    // ada token pending yg belum dikonfirmasi -> tampilkan loading,
+    // biar JS yang confirm
     if (isset($_SESSION['qr_pending_t'])) {
         ?>
         <!DOCTYPE html>
@@ -119,7 +94,7 @@ if (!$qrValid) {
         exit;
     }
 
-    // TIDAK ada token pending & session gak valid -> BLOKIR TOTAL
+    // TIDAK ada token pending & session tidak valid -> BLOKIR TOTAL
     unset($_SESSION['qr_ok'], $_SESSION['qr_ok_time']);
     ?>
     <!DOCTYPE html>
@@ -141,37 +116,22 @@ if (!$qrValid) {
         <div class="box">
             <i class="fa-solid fa-qrcode"></i>
             <h2>Scan QR Diperlukan</h2>
-            <p>Halaman absen hanya bisa diakses dengan scan QR Code yang aktif di layar panitia. QR berganti tiap 5 detik dan hanya bisa dipakai SEKALI, jadi tautan lama / hasil screenshot / kiriman dari orang lain tidak akan berfungsi.</p>
+            <p>Halaman absen hanya bisa diakses dengan scan QR Code yang aktif di layar panitia. QR berganti tiap 10 detik dan hanya bisa dipakai SEKALI, jadi tautan lama / hasil screenshot / kiriman dari orang lain tidak akan berfungsi.</p>
         </div>
     </body>
     </html>
     <?php
     exit;
 }
+
 // ===============================
 // KONFIGURASI RADIUS ABSENSI
 // ===============================
 $MAX_RADIUS = 300; // meter
 
-// ==========================================================
-// KENAPA ADA $GPS_ACCURACY_BUFFER_MAX
-// ==========================================================
-// GPS HP itu ga pernah presisi 100%. Browser ngasih tau sendiri lewat
-// pos.coords.accuracy (radius ketidakpastian dalam meter) - makin
-// jelek sinyal (dalam gedung, deket tembok/beton, cuaca dll), makin
-// gede angkanya. Kalau radius absen udah diperketat TAPI toleransi
-// ini ga ada, peserta yang beneran ada di lokasi bisa aja keukur
-// "di luar radius" padahal cuma gara-gara GPS-nya nyimpang dikit -
-// apalagi di dalam gedung RS (banyak tembok/beton/lantai bertingkat),
-// GPS drift 100-200m itu hal yang WAJAR, bukan anomali.
-//
-// Makanya jarak yang dihitung dibandingin ke "radius efektif" =
-// $MAX_RADIUS + akurasi GPS device (dikirim browser), BUKAN cuma
-// $MAX_RADIUS mentah. Supaya ga disalahgunakan (misal ada yg coba
-// kirim angka akurasi ngawur biar radiusnya kebuka lebar), buffer ini
-// DIBATASI maksimal $GPS_ACCURACY_BUFFER_MAX meter aja, jadi radius
-// efektif paling longgar tetap $MAX_RADIUS + buffer max.
-$GPS_ACCURACY_BUFFER_MAX = 100; // meter, plafon buffer dari akurasi GPS
+// Radius efektif = $MAX_RADIUS + akurasi GPS device (dibatasi plafon),
+// karena GPS di dalam gedung wajar drift 100-200m.
+$GPS_ACCURACY_BUFFER_MAX = 100; // meter
 
 function hitungJarak($lat1, $lon1, $lat2, $lon2) {
     $earthRadius = 6371000;
@@ -188,17 +148,29 @@ function hitungJarak($lat1, $lon1, $lat2, $lon2) {
 }
 
 // ===============================
+// HELPER QUERY (prepared statement)
+// ===============================
+// Ambil 1 baris (assoc array) atau null kalau tidak ada.
+function qOne($sql, $types, ...$params) {
+    global $conn;
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+// Ambil nilai POST sebagai string (aman kalau dikirim sebagai array)
+function postStr($key) {
+    return (isset($_POST[$key]) && is_string($_POST[$key])) ? trim($_POST[$key]) : '';
+}
+
+// ===============================
 // KOMPRESI FOTO
 // ===============================
 // NONAKTIF SEMENTARA: absen sekarang tidak pakai foto lagi.
-// Fungsi ini SENGAJA DIBIARKAN (tidak dihapus) buat jaga-jaga kalau
-// fitur foto diaktifkan lagi di masa depan. Tinggal panggil lagi
-// kompresFoto() di bagian proses absen kalau dibutuhkan.
-//
-// Resize (kalau lebar > $maxWidth) + re-encode ke JPEG dengan quality
-// yang diturunin bertahap sampai ukuran file di bawah $maxSizeKB.
-// Selalu disimpan sbg .jpg apapun format aslinya (jpg/png), biar
-// kompresinya konsisten & predictable.
+// Fungsi dibiarkan kalau fitur foto diaktifkan lagi.
 function kompresFoto($sourcePath, $targetPath, $maxWidth = 1280, $quality = 75, $maxSizeKB = 300) {
     if (!extension_loaded('gd')) return false;
 
@@ -220,29 +192,25 @@ function kompresFoto($sourcePath, $targetPath, $maxWidth = 1280, $quality = 75, 
     $origWidth  = imagesx($img);
     $origHeight = imagesy($img);
 
-    // resize proporsional kalau kelebaran
     if ($origWidth > $maxWidth) {
         $newWidth  = $maxWidth;
         $newHeight = intval($origHeight * ($maxWidth / $origWidth));
 
         $resized = imagecreatetruecolor($newWidth, $newHeight);
-        // background putih, biar PNG transparan ga jadi item pas dijadiin JPEG
         imagefill($resized, 0, 0, imagecolorallocate($resized, 255, 255, 255));
         imagecopyresampled($resized, $img, 0, 0, 0, 0, $newWidth, $newHeight, $origWidth, $origHeight);
 
-        imagedestroy($img);
-        $img = $resized;
+        $img = $resized; // di PHP 8 GdImage dibersihkan otomatis, imagedestroy() sudah deprecated
     }
 
-    // simpan, turunin quality bertahap kalau masih di atas target ukuran
     $q = $quality;
     do {
         imagejpeg($img, $targetPath, $q);
+        clearstatcache(true, $targetPath);
         $sizeKB = filesize($targetPath) / 1024;
         $q -= 10;
     } while ($sizeKB > $maxSizeKB && $q >= 30);
 
-    imagedestroy($img);
     return true;
 }
 
@@ -265,7 +233,7 @@ if (isset($_SESSION['absen_sukses'])) {
 // DATA EVENT (dari list_event_rs)
 // ===============================
 $eventOpt = '<option value="">Pilih Event</option>';
-$qEvent = mysql_query("
+$qEvent = $conn->query("
     SELECT
         id_event,
         nama_event,
@@ -280,15 +248,15 @@ $qEvent = mysql_query("
     ORDER BY date ASC, mulai ASC
     LIMIT 5
 ");
-while ($ev = mysql_fetch_assoc($qEvent)) {
+while ($ev = $qEvent->fetch_assoc()) {
     $jamLabel = '';
     if (!empty($ev['mulai']) || !empty($ev['selesai'])) {
-        $jamLabel = ' (' . substr($ev['mulai'],0,5) . '-' . substr($ev['selesai'],0,5) . ')';
+        $jamLabel = ' (' . substr((string)$ev['mulai'], 0, 5) . '-' . substr((string)$ev['selesai'], 0, 5) . ')';
     }
     $labelLokasi = !empty($ev['nama_lokasi']) ? ' - ' . $ev['nama_lokasi'] : '';
 
-    $eventOpt .= '<option value="'.$ev['id_event'].'">'
-        . htmlspecialchars($ev['nama_event']) . $labelLokasi
+    $eventOpt .= '<option value="' . htmlspecialchars((string)$ev['id_event']) . '">'
+        . htmlspecialchars($ev['nama_event']) . htmlspecialchars($labelLokasi)
         . ' | ' . $ev['tgl_event'] . $jamLabel
         . '</option>';
 }
@@ -298,15 +266,15 @@ while ($ev = mysql_fetch_assoc($qEvent)) {
 // ===============================
 if (isset($_POST['absen'])) {
 
-    $hp        = isset($_POST['hp']) ? trim($_POST['hp']) : '';
-    $pass_raw  = isset($_POST['password']) ? trim($_POST['password']) : '';
-    $id_event  = isset($_POST['id_event']) ? $_POST['id_event'] : '';
-    $lat       = isset($_POST['latitude']) ? $_POST['latitude'] : '';
-    $lng       = isset($_POST['longitude']) ? $_POST['longitude'] : '';
-    $accuracy  = isset($_POST['accuracy']) ? $_POST['accuracy'] : '';
-    $device_id = isset($_POST['device_id']) ? trim($_POST['device_id']) : '';
+    $hp        = postStr('hp');
+    $pass_raw  = postStr('password');
+    $id_event  = postStr('id_event');
+    $lat       = postStr('latitude');
+    $lng       = postStr('longitude');
+    $accuracy  = postStr('accuracy');
+    $device_id = postStr('device_id');
 
-    if ($hp=='' || $pass_raw=='' || $id_event=='') {
+    if ($hp == '' || $pass_raw == '' || $id_event == '') {
         $error = "Semua field wajib diisi";
     }
 
@@ -318,191 +286,133 @@ if (isset($_POST['absen'])) {
         $error = "Lokasi tidak terbaca, aktifkan GPS";
     }
 
-    $id_pegawai = '';
-    if ($error == '') {
-        $passHash = md5(sha1($pass_raw));
+    try {
 
-        $qPeg = mysql_query("
-            SELECT PEGAWAI_ID FROM pegawai
-            WHERE REPLACE(REPLACE(HP, '.', ''), '-', '') = '".mysql_real_escape_string($hp)."'
-            AND PASSWORD = '".mysql_real_escape_string($passHash)."'
-            LIMIT 1
-        ");
+        $id_pegawai = '';
+        if ($error == '') {
+            // Hash lama (md5(sha1)) dipertahankan agar cocok dengan data di DB
+            $passHash = md5(sha1($pass_raw));
 
-        if (mysql_num_rows($qPeg)==0) {
-            $error = "No HP atau password salah";
-        } else {
-            $peg = mysql_fetch_assoc($qPeg);
-            $id_pegawai = $peg['PEGAWAI_ID'];
-        }
-    }
+            $peg = qOne("
+                SELECT PEGAWAI_ID FROM pegawai
+                WHERE REPLACE(REPLACE(HP, '.', ''), '-', '') = ?
+                AND PASSWORD = ?
+                LIMIT 1
+            ", 'ss', $hp, $passHash);
 
-    $eventData = null;
-    if ($error == '') {
-        $qEv = mysql_query("
-            SELECT * FROM list_event_rs
-            WHERE id_event='".mysql_real_escape_string($id_event)."'
-            AND (deletemark IS NULL OR deletemark = 0)
-            LIMIT 1
-        ");
-
-        if (mysql_num_rows($qEv)==0) {
-            $error = "Event tidak ditemukan";
-        } else {
-            $eventData = mysql_fetch_assoc($qEv);
-        }
-    }
-
-    if ($error == '' && $eventData) {
-        $eventDate   = $eventData['date'];
-        $jamMulai    = $eventData['mulai'];
-        $jamSelesai  = $eventData['selesai'];
-
-        if (!empty($jamMulai) && !empty($jamSelesai)) {
-            $mulaiTimestamp   = strtotime($eventDate . ' ' . $jamMulai);
-            $selesaiTimestamp = strtotime($eventDate . ' ' . $jamSelesai);
-            $bukaTimestamp    = $mulaiTimestamp - 3600;
-            $nowTimestamp     = strtotime($nowDatetime);
-
-            if ($nowTimestamp < $bukaTimestamp) {
-                $error = "Absen baru dibuka pukul " . date('H:i', $bukaTimestamp)
-                    . " (1 jam sebelum acara dimulai)";
-            } elseif ($nowTimestamp > $selesaiTimestamp) {
-                $error = "Absen sudah ditutup, acara telah selesai pukul " . date('H:i', $selesaiTimestamp);
+            if (!$peg) {
+                $error = "No HP atau password salah";
+            } else {
+                $id_pegawai = (string)$peg['PEGAWAI_ID'];
             }
         }
-    }
 
-    if ($error == '' && $eventData) {
-        $koordinat = explode(',', $eventData['latitude_longitude']);
+        $eventData = null;
+        if ($error == '') {
+            $eventData = qOne("
+                SELECT * FROM list_event_rs
+                WHERE id_event = ?
+                AND (deletemark IS NULL OR deletemark = 0)
+                LIMIT 1
+            ", 's', $id_event);
 
-        if (count($koordinat) == 2) {
-            $eventLat = trim($koordinat[0]);
-            $eventLng = trim($koordinat[1]);
-
-            $jarak = hitungJarak($eventLat, $eventLng, $lat, $lng);
-
-            // buffer dari akurasi GPS device, dibatasi plafon biar ga disalahgunakan
-            $bufferAkurasi = is_numeric($accuracy) ? min((float) $accuracy, $GPS_ACCURACY_BUFFER_MAX) : 0;
-            $radiusEfektif = $MAX_RADIUS + $bufferAkurasi;
-
-            if ($jarak > $radiusEfektif) {
-                $error = "Anda berada di luar lokasi event (±" . round($jarak) . " m)";
-            }
-        } else {
-            $error = "Lokasi event belum diset dengan benar";
-        }
-    }
-
-    if ($error == '') {
-        $cek = mysql_query("
-            SELECT id_absensi_pegawai FROM absensi_pegawai
-            WHERE pegawai_id='".mysql_real_escape_string($id_pegawai)."'
-            AND event_id='".mysql_real_escape_string($id_event)."'
-            AND (deletemark IS NULL OR deletemark = 0)
-        ");
-
-        if (mysql_num_rows($cek) > 0) {
-            $error = "Anda sudah absen pada event ini";
-        }
-    }
-
-    if ($error == '') {
-        $cekDevice = mysql_query("
-            SELECT id_absensi_pegawai FROM absensi_pegawai
-            WHERE device_id='".mysql_real_escape_string($device_id)."'
-            AND event_id='".mysql_real_escape_string($id_event)."'
-            AND (deletemark IS NULL OR deletemark = 0)
-        ");
-
-        if (mysql_num_rows($cekDevice) > 0) {
-            $error = "Perangkat ini sudah digunakan untuk absen pada event ini";
-        }
-    }
-
-    // ===============================
-    // FOTO KEHADIRAN — DINONAKTIFKAN
-    // ===============================
-    // Input & validasi foto sengaja DIMATIKAN karena absen sekarang
-    // tidak pakai foto lagi. Kolom foto_pegawai tetap diisi string
-    // kosong biar struktur query INSERT & fungsi kompresFoto() di atas
-    // ga perlu diubah/dihapus — tinggal aktifkan lagi kapan-kapan kalau
-    // fitur foto dipakai lagi (uncomment blok di bawah ini + balikin
-    // input file-nya di form HTML).
-    $fotoPathDB = '';
-
-    /*
-    if ($error == '') {
-        if (!isset($_FILES['foto_pegawai']) || $_FILES['foto_pegawai']['error'] !== UPLOAD_ERR_OK) {
-            $error = "Foto wajib diambil / gagal diupload";
-        } elseif ($_FILES['foto_pegawai']['size'] > 5 * 1024 * 1024) {
-            $error = "Ukuran foto maksimal 5MB";
-        } else {
-            $extAllowed = array('jpg', 'jpeg', 'png');
-            $ext = strtolower(pathinfo($_FILES['foto_pegawai']['name'], PATHINFO_EXTENSION));
-
-            if (!in_array($ext, $extAllowed)) {
-                $error = "Format foto harus jpg/jpeg/png";
-            } elseif (@getimagesize($_FILES['foto_pegawai']['tmp_name']) === false) {
-                // pastikan file beneran gambar, bukan file lain yg diganti ekstensi
-                $error = "File yang diupload bukan gambar yang valid";
+            if (!$eventData) {
+                $error = "Event tidak ditemukan";
             }
         }
-    }
 
-    if ($error == '') {
-        // nama folder: (NamaEvent_TanggalEvent), dibersihkan dari karakter aneh
-        $namaFolderEvent = preg_replace('/[^A-Za-z0-9]+/', '_', $eventData['nama_event']);
-        $namaFolderEvent = trim($namaFolderEvent, '_');
-        $tanggalFolder   = $eventData['date']; // format Y-m-d dari DB
+        if ($error == '' && $eventData) {
+            $eventDate   = $eventData['date'];
+            $jamMulai    = $eventData['mulai'];
+            $jamSelesai  = $eventData['selesai'];
 
-        $folderRelatif = 'assets/foto_karyawan/' . $namaFolderEvent . '_' . $tanggalFolder . '/';
-        $folderAbsolut = __DIR__ . '/' . $folderRelatif;
+            if (!empty($jamMulai) && !empty($jamSelesai)) {
+                $mulaiTimestamp   = strtotime($eventDate . ' ' . $jamMulai);
+                $selesaiTimestamp = strtotime($eventDate . ' ' . $jamSelesai);
+                $bukaTimestamp    = $mulaiTimestamp - 3600;
+                $nowTimestamp     = strtotime($nowDatetime);
 
-        if (!is_dir($folderAbsolut)) {
-            @mkdir($folderAbsolut, 0755, true);
-        }
-
-        if (!is_dir($folderAbsolut) || !is_writable($folderAbsolut)) {
-            $error = "Gagal membuat folder penyimpanan foto, hubungi admin";
-        } else {
-            // selalu disimpan sbg .jpg (hasil kompresi), apapun ekstensi aslinya
-            $namaFile   = $id_pegawai . '_' . date('His') . '_' . uniqid() . '.jpg';
-            $targetPath = $folderAbsolut . $namaFile;
-
-            $berhasilKompres = kompresFoto($_FILES['foto_pegawai']['tmp_name'], $targetPath, 1280, 75, 300);
-
-            if (!$berhasilKompres) {
-                // fallback: kalau GD gagal/gak ada, simpan file asli tanpa kompresi
-                // drpd absen gagal total gara-gara masalah teknis kompresi
-                $namaFile   = $id_pegawai . '_' . date('His') . '_' . uniqid() . '.' . $ext;
-                $targetPath = $folderAbsolut . $namaFile;
-
-                if (!move_uploaded_file($_FILES['foto_pegawai']['tmp_name'], $targetPath)) {
-                    $error = "Gagal menyimpan foto, silakan coba lagi";
+                if ($nowTimestamp < $bukaTimestamp) {
+                    $error = "Absen baru dibuka pukul " . date('H:i', $bukaTimestamp)
+                        . " (1 jam sebelum acara dimulai)";
+                } elseif ($nowTimestamp > $selesaiTimestamp) {
+                    $error = "Absen sudah ditutup, acara telah selesai pukul " . date('H:i', $selesaiTimestamp);
                 }
             }
+        }
 
-            if ($error == '') {
-                $fotoPathDB = $folderRelatif . $namaFile; // ini yg disimpan ke DB
+        if ($error == '' && $eventData) {
+            $koordinat = explode(',', (string)$eventData['latitude_longitude']);
+
+            if (count($koordinat) == 2 && is_numeric(trim($koordinat[0])) && is_numeric(trim($koordinat[1]))) {
+                $eventLat = (float) trim($koordinat[0]);
+                $eventLng = (float) trim($koordinat[1]);
+
+                $jarak = hitungJarak($eventLat, $eventLng, (float)$lat, (float)$lng);
+
+                // buffer dari akurasi GPS device, dibatasi plafon
+                $bufferAkurasi = is_numeric($accuracy) ? min((float) $accuracy, $GPS_ACCURACY_BUFFER_MAX) : 0;
+                $radiusEfektif = $MAX_RADIUS + $bufferAkurasi;
+
+                if ($jarak > $radiusEfektif) {
+                    $error = "Anda berada di luar lokasi event (±" . round($jarak) . " m)";
+                }
+            } else {
+                $error = "Lokasi event belum diset dengan benar";
             }
         }
-    }
-    */
 
-    if ($error == '') {
-        mysql_query("
-            INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, foto_pegawai, deletemark)
-            VALUES (
-                '".mysql_real_escape_string($id_pegawai)."',
-                '".mysql_real_escape_string($id_event)."',
-                '$nowDatetime',
-                '".mysql_real_escape_string($device_id)."',
-                '".mysql_real_escape_string($fotoPathDB)."',
-                0
-            )
-        ");
-        $sukses = "Absen berhasil dicatat";
+        if ($error == '') {
+            $cek = qOne("
+                SELECT id_absensi_pegawai FROM absensi_pegawai
+                WHERE pegawai_id = ?
+                AND event_id = ?
+                AND (deletemark IS NULL OR deletemark = 0)
+                LIMIT 1
+            ", 'ss', $id_pegawai, $id_event);
+
+            if ($cek) {
+                $error = "Anda sudah absen pada event ini";
+            }
+        }
+
+        if ($error == '') {
+            $cekDevice = qOne("
+                SELECT id_absensi_pegawai FROM absensi_pegawai
+                WHERE device_id = ?
+                AND event_id = ?
+                AND (deletemark IS NULL OR deletemark = 0)
+                LIMIT 1
+            ", 'ss', $device_id, $id_event);
+
+            if ($cekDevice) {
+                $error = "Perangkat ini sudah digunakan untuk absen pada event ini";
+            }
+        }
+
+        // ===============================
+        // FOTO KEHADIRAN — DINONAKTIFKAN
+        // ===============================
+        // Kolom foto_pegawai tetap diisi string kosong. Untuk mengaktifkan
+        // lagi, ambil blok upload dari versi lama + kembalikan input file di form.
+        $fotoPathDB = '';
+
+        if ($error == '') {
+            $stmt = $conn->prepare("
+                INSERT INTO absensi_pegawai (pegawai_id, event_id, tanggal_absen, device_id, foto_pegawai, deletemark)
+                VALUES (?, ?, ?, ?, ?, 0)
+            ");
+            $stmt->bind_param('sssss', $id_pegawai, $id_event, $nowDatetime, $device_id, $fotoPathDB);
+            $stmt->execute();
+            $stmt->close();
+
+            $sukses = "Absen berhasil dicatat";
+        }
+
+    } catch (mysqli_sql_exception $e) {
+        error_log('Absen error: ' . $e->getMessage());
+        $error  = "Terjadi kesalahan pada server, silakan coba lagi";
+        $sukses = '';
     }
 
     $_SESSION['absen_error']  = $error;
@@ -809,15 +719,15 @@ form.addEventListener('submit', function (e) {
 });
 </script>
 
-<?php if ($error!='') { ?>
+<?php if ($error != '') { ?>
 <script>
-Swal.fire({ icon:'error', title:'Absen Gagal', text:'<?= addslashes($error) ?>' });
+Swal.fire({ icon:'error', title:'Absen Gagal', text: <?= json_encode($error, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?> });
 </script>
 <?php } ?>
 
-<?php if ($sukses!='') { ?>
+<?php if ($sukses != '') { ?>
 <script>
-Swal.fire({ icon:'success', text:'<?= addslashes($sukses) ?>' });
+Swal.fire({ icon:'success', text: <?= json_encode($sukses, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?> });
 </script>
 <?php } ?>
 

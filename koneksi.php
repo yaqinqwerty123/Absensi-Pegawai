@@ -1,6 +1,6 @@
 <?php
 // ==========================================================
-// KONEKSI DATABASE (native mysql_*)
+// KONEKSI DATABASE (mysqli, kompatibel PHP 8.4)
 // Kredensial disamakan dengan config CodeIgniter (database.php)
 // hostname : 192.168.0.233
 // database : rsmn_sdm
@@ -11,18 +11,16 @@ $user   = "umum";
 $pass   = "RSmndb2020";
 $dbname = "rsmn_sdm";
 
-$conn = mysql_connect($host, $user, $pass);
+// Sejak PHP 8.1 mysqli melempar exception secara default.
+// Kita tangkap saat connect supaya pesan error tidak membocorkan detail server.
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-if (!$conn) {
-    die("Koneksi ke database gagal: " . mysql_error());
+try {
+    $conn = new mysqli($host, $user, $pass, $dbname);
+    // utf8mb4 = superset dari utf8 (config CI), aman untuk tabel utf8 lama
+    $conn->set_charset('utf8mb4');
+} catch (mysqli_sql_exception $e) {
+    error_log('Koneksi DB gagal: ' . $e->getMessage());
+    http_response_code(500);
+    die("Koneksi ke database gagal. Hubungi admin.");
 }
-
-$pilih_db = mysql_select_db($dbname, $conn);
-
-if (!$pilih_db) {
-    die("Database '$dbname' tidak ditemukan: " . mysql_error());
-}
-
-// samain charset dengan config CI (char_set: utf8)
-mysql_query("SET NAMES 'utf8'", $conn);
-?>

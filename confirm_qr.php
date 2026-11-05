@@ -6,26 +6,34 @@ date_default_timezone_set('Asia/Jakarta');
 define('QR_SECRET_KEY', 'RSMN-GANTI-STRING-RAHASIA-INI-2026');
 $QR_SESSION_WINDOW = 300; // samain dengan yang di index.php
 
-
-
 function tandaiTokenTerpakai($t) {
+    global $conn;
     $t   = (int) $t;
     $sid = session_id(); // beda tiap device/browser yang lagi absen
 
-    @mysql_query("INSERT INTO qr_token_used (t_value, session_id, used_at) 
-                  VALUES ('".$t."', '".mysql_real_escape_string($sid)."', NOW())");
-
-    return (mysql_affected_rows() > 0);
+    // Kalau t_value sudah ada (primary key/unique), mysqli di PHP 8.1+
+    // MELEMPAR exception (bukan return false seperti mysql_query lama),
+    // jadi harus ditangkap -> artinya token sudah dipakai.
+    try {
+        $stmt = $conn->prepare(
+            "INSERT INTO qr_token_used (t_value, session_id, used_at) VALUES (?, ?, NOW())"
+        );
+        $stmt->bind_param('is', $t, $sid);
+        $stmt->execute();
+        $ok = ($stmt->affected_rows > 0);
+        $stmt->close();
+        return $ok;
+    } catch (mysqli_sql_exception $e) {
+        return false;
+    }
 }
 
 header('Content-Type: application/json');
 
-// PENTING: kalau session ini udah keburu valid duluan (misal ada request
-// kembar/dobel yang lebih cepat consume token-nya), anggap ini SUKSES juga.
-// Tanpa ini, request kedua yang telat dikit bakal salah dianggap gagal
-// padahal token untuk session yang sama udah berhasil di-consume.
-if (isset($_SESSION['qr_ok']) && $_SESSION['qr_ok']
-    && (time() - $_SESSION['qr_ok_time'] <= $QR_SESSION_WINDOW)) {
+// Kalau session ini sudah keburu valid duluan (request kembar yang lebih cepat),
+// anggap SUKSES juga.
+if (!empty($_SESSION['qr_ok'])
+    && (time() - (int)($_SESSION['qr_ok_time'] ?? 0) <= $QR_SESSION_WINDOW)) {
     echo json_encode(array('result' => 'true'));
     exit;
 }
